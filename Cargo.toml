@@ -1,0 +1,17 @@
+[package]
+name = "keybow-playing"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rppal = "0.16.0"
+rgb = "0.8.37"
+bitmaps = "3.2.0"
+
+[features]
+debug_waveform_print = []  # cargo run --features debug_waveform_print
+
+#[build]
+#rustdocflags = ["--document-private-items"] # Not working, so do by hand: cargo doc --document-private-items
