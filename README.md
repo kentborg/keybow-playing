@@ -1,4 +1,4 @@
-# keybow-playing
+# rppal-playing
 
 
 ## Work in Progress
@@ -150,11 +150,10 @@ works correctly first try.
 
 ## Next Steps
 
-I have too many TODOs outstanding. I would like to get to writing more
-interesting application code, but more cleanup first.
+Do something in application space.
 
 ## Examples
 
-At the moment `src/main,rs` is a fairly minimal example of how to use
+At the moment `src/main.rs` is a fairly minimal example of how to use
 my `Keybow` module.
 

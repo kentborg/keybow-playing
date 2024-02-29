@@ -149,8 +149,7 @@ works correctly first try.
 
 # Next Steps
 
-I have too many TODOs outstanding. I would like to get to writing more
-interesting application code, but more cleanup first.
+Do something in application space.
 
 # Examples
 
