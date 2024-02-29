@@ -26,19 +26,30 @@
  */
 
 pub mod hw_specific;
-pub mod macros;
 mod keys;
 mod leds;
+pub mod macros;
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
+use std::{error::Error, fmt::Debug};
 
 use bitmaps::Bitmap;
+use thiserror::Error;
 
 use rppal::gpio::{Gpio, InputPin, Level, Trigger};
 use rppal::spi;
+
+#[derive(Error, Debug)]
+pub enum KeybowError {
+    #[error(
+        "Bad LED location {bad_location:?}, (expected < hw_specific::NUM_LEDS, which is {})",
+        hw_specific::NUM_LEDS
+    )]
+    BadKeyLocation { bad_location: KeyLocation },
+}
 
 #[derive(Debug, Clone)]
 /// The struct for interacting with Keybow.
@@ -46,7 +57,7 @@ pub struct Keybow {
     led_data: Arc<Mutex<[rgb::RGB<u8>; hw_specific::NUM_LEDS]>>,
     brightness: f32,
     spi: Arc<Mutex<spi::Spi>>,
-    _gpio: Gpio, // TODO: Delete? Really??
+    _gpio: Gpio,
     gpio_keys: Vec<Arc<Mutex<rppal::gpio::InputPin>>>,
     key_state_debounce_data: Vec<Arc<Mutex<KeyStateDebounceData>>>,
     debounce_thread_vec: Vec<Arc<Mutex<thread::JoinHandle<()>>>>,
@@ -59,7 +70,7 @@ pub struct Keybow {
 pub struct KeyEvent {
     pub key_index: usize,
     pub key_char: char,
-    pub key_value: bool,
+    pub key_position: KeyPosition,
     pub key_instant: Instant,
     pub key_systime: SystemTime,
     pub up_down_values: Bitmap<{ hw_specific::NUM_KEYS }>,
@@ -77,7 +88,8 @@ struct CustRegInner {
 }
 
 #[derive(Debug, Clone)]
-/// Struct for getting debounced key events.
+/// Struct for getting debounced key events. To obtain one of these
+/// call `keybow::register_events()`.
 pub struct CustReg {
     // We need our client code to have a mutex to the registration
     // data but we will keep a weak reference to it so we can know
@@ -87,16 +99,17 @@ pub struct CustReg {
     // client code; the client code should just make simple method
     // calls. So it is a simple struct on the outside. On the inside?
     // The mutex we actually want the client to have.
-    the_reg: Arc<Mutex<CustRegInner>>,
+    reg_inner: Arc<Mutex<CustRegInner>>,
+    iter_timeout: Duration,
 }
 
 #[derive(Debug, Copy, Clone)]
 pub struct KeyStateDebounceData {
-    stable_key_value_p: bool,
+    stable_key_position: KeyPosition,
     stable_key_instant: Instant,
     stable_key_systime: SystemTime,
     debounce_state: DebounceState,
-    raw_key_value_p: bool,
+    raw_key_position: KeyPosition,
     raw_key_instant: Instant,
     test_stable_time: Instant,
     bounce_count: u32,
@@ -116,15 +129,29 @@ pub enum DebounceState {
     Unstable, // Thread is sleeping, then checking, then sleeping…
 }
 
-pub enum KeyPosition {
+#[derive(Debug)]
+pub enum KeyLocation {
     Coordinate(Point),
     Index(usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum KeyPosition {
+    Up,
+    Down,
+}
+
 /// Look up (x,y) and get back key/LED index.
-fn coord_to_index(coordinate: Point) -> usize {
-    // TODO: Check coordinate is sensible, return error if bad.
-    HardwareInfo::get_info().xy_to_index_lookup[coordinate.x][coordinate.y]
+fn coord_to_index(coordinate: Point) -> Result<usize, KeybowError> {
+    let two_d_array = HardwareInfo::get_info().xy_to_index_lookup;
+
+    if coordinate.x >= two_d_array.len() || coordinate.y >= two_d_array[0].len() {
+        Err(KeybowError::BadKeyLocation {
+            bad_location: KeyLocation::Coordinate(coordinate),
+        })
+    } else {
+        Ok(two_d_array[coordinate.x][coordinate.y])
+    }
 }
 
 #[derive(Debug)]

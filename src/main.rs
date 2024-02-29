@@ -1,4 +1,4 @@
-/*! 
+/*!
 
 # Work in Progress
 
@@ -69,10 +69,10 @@ featureful, but my purpose is to learn:
 - Arbitrary number of theads can be clients, they can spawn and exit
   as they please, in whatever sequence, each getting whatever events
   it registered interest in.
-  
+
 - Be fast and not a pig.
-  
-  
+
+
 ## Background: Debouncing
 
 When a mechanical switch makes contact it will "bounce". That is, make
@@ -106,29 +106,29 @@ I do this:
   time (`Instant`) somewhat into the future at which point the key
   might have settled down. (Assuming no new raw events have happened
   before then.)
-  
+
 - If this is start of a new event, the debounce callback `unpark()`s
   the corresponding debounce thread.
-  
+
 - The debounce callback then returns.
-  
+
 - Now the freshly unparked debounce thread looks at the stored
   `Instant` and sleeps until then.
-  
+
 - When the debounce thread wakes up, it checks to see whether the
   stored future `Instant` changed while it was sleeping. If it has
   that means there is still activity, so it sleeps again until the new
   `Instant` value.
-  
+
 - If there has been no activity while the debounce thread was
   sleeping, then we are stable. Record the details, and `park()` until
   the next event.
-  
+
 Yes, I have created two-dozen threads, but they are small and they
 mostly don't do much. It seems the Pi Zero can handle them with ease.
 
 ## Learning a Lot
- 
+
 I honestly don't know what I think of my approach so far, but I am
 pleased it works and that Rust is willing to do what I want it to
 do. I suspect I have too many mutexes. I'm also not sure what it means
@@ -146,24 +146,24 @@ what code I need to touch whenever I take working code and start
 making changes to add some new aspect. Once the the compiler is happy,
 I copy the code to the target, build it again there, and usually it
 works correctly first try.
- 
+
 # Next Steps
- 
+
 I have too many TODOs outstanding. I would like to get to writing more
 interesting application code, but more cleanup first.
- 
+
 # Examples
- 
-At the moment `src/main,rs` is a fairly minimal example of how to use
+
+At the moment `src/main.rs` is a fairly minimal example of how to use
 my `Keybow` module.
 
  */
-
 
 #![feature(thread_sleep_until)]
 
 pub mod keybow;
 
+use std::iter::zip;
 use std::thread;
 use std::time::Duration;
 
@@ -171,17 +171,51 @@ use bitmaps::Bitmap;
 
 /// Simple main() function, at this point mostly an example for using
 /// `keybow` module.
-fn main() {
+fn main() -> anyhow::Result<()> {
     {
-        // Read some keys.
+        println!("Read some keys…");
+
         let keybow = keybow::Keybow::new();
 
-        println!("key 0 is {}", keybow.get_key(0));
+        // This will blow up, with a stacktrace if RUST_BACKTRACE is
+        // set:
+        //let _bad_key_read = keybow.get_key_raw(42)?;
+
+        println!("{:?}", keybow.get_key_raw(42));
+
+        println!("key 0 is {:?}", keybow.get_key(0));
+
+        // bitmap holds bools
         println!("key 1 is {:?}", keybow.get_keys().get(1));
     }
 
     {
-        // Very simple game two-player game.
+        println!("Read some keys via iterator…");
+
+        let mut keybow = keybow::Keybow::new();
+
+        let mut down_mask = Bitmap::new();
+        for one_key in 0..12 {
+            down_mask.set(one_key, true);
+        }
+
+        let mut reg = keybow.register_events(
+            down_mask,
+            Bitmap::new(),
+            20,
+            ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b'],
+            None,
+        );
+
+        println!("{:?}", reg.next());
+        println!("{:?}", reg.next());
+        println!("{:?}", reg.next());
+        println!("{:?}", reg.next());
+    }
+
+    {
+        println!("Play simple game…");
+
         const BLACK: rgb::RGB<u8> = rgb::RGB { r: 0, g: 0, b: 0 };
         const GRAY: rgb::RGB<u8> = rgb::RGB {
             r: 20,
@@ -193,8 +227,8 @@ fn main() {
 
         let mut keybow = keybow::Keybow::new();
 
-        for index in 0..=11 {
-            keybow.set_led(keybow::KeyPosition::Index(index), GRAY);
+        for index in 0..12 {
+            keybow.set_led(keybow::KeyLocation::Index(index), GRAY)?;
         }
         let _ = keybow.show_leds();
 
@@ -210,9 +244,10 @@ fn main() {
         _ = player2.join();
 
         for one_index in 0..=11 {
-            keybow.set_led(keybow::KeyPosition::Index(one_index), BLACK);
+            keybow.set_led(keybow::KeyLocation::Index(one_index), BLACK)?;
         }
         let _ = keybow.show_leds();
+        Ok(())
     }
 }
 
@@ -223,7 +258,7 @@ fn loop_on_events(
     our_color: rgb::RGB<u8>,
     no_color: rgb::RGB<u8>,
     black: rgb::RGB<u8>,
-) {
+) -> anyhow::Result<()> {
     let mut keybow = keybow::Keybow::new();
     let mut our_mask = Bitmap::new();
     for one_key in our_keys {
@@ -235,45 +270,53 @@ fn loop_on_events(
         our_mask,
         20,
         ['0'; keybow::hw_specific::NUM_KEYS], // Don't care.
+        None,
     );
 
+    // Player keys are paired, press my own key to light that key, and
+    // to turn off the corresponding key of my opponent. This maps from
+    // my key to opponent's corresponding key.
+    let mut global_ours_to_theirs = [0; keybow::hw_specific::NUM_KEYS];
+    let ours_theirs = zip(our_keys, their_keys);
+    for (ours, theirs) in ours_theirs {
+        global_ours_to_theirs[*ours] = *theirs;
+    }
+
     loop {
-        match reg.wait_next_key_event_masked(our_mask, Duration::from_secs(5)) {
-            Some(event) => {
-                let our_global_index = event.key_index;
-                let player_index = our_keys
-                    .iter()
-                    .position(|&r| r == our_global_index)
-                    .unwrap();
-                if event.key_value {
+        if let Some(event) = reg.wait_next_key_event_masked(our_mask, Duration::from_secs(5)) {
+            let our_global_index = event.key_index;
+            match event.key_position {
+                keybow::KeyPosition::Down => {
                     // key down, turn on our LED
-                    keybow.set_led(keybow::KeyPosition::Index(our_global_index), our_color);
-                } else {
+                    keybow.set_led(keybow::KeyLocation::Index(our_global_index), our_color)?;
+                }
+                keybow::KeyPosition::Up => {
                     // key up, turn off other player's LED
-                    let their_global_index = their_keys[player_index];
-                    keybow.set_led(keybow::KeyPosition::Index(their_global_index), no_color);
-                };
-                let _ = keybow.show_leds();
-                {
-                    let led_snapshot = keybow.get_leds();
-                    let mut all_our_color = true;
-                    for one_index in our_keys {
-                        if led_snapshot[*one_index] != our_color {
-                            all_our_color = false;
-                            break;
-                        }
-                    }
-                    if all_our_color {
-                        // Declare victory (turn out our LEDs) and go home.
-                        for one_index in our_keys {
-                            keybow.set_led(keybow::KeyPosition::Index(*one_index), black);
-                        }
-                        let _ = keybow.show_leds();
-                        return;
+                    keybow.set_led(
+                        keybow::KeyLocation::Index(global_ours_to_theirs[our_global_index]),
+                        no_color,
+                    )?;
+                }
+            };
+            let _ = keybow.show_leds();
+            {
+                let led_snapshot = keybow.get_leds();
+                let mut all_our_color = true;
+                for one_index in our_keys {
+                    if led_snapshot[*one_index] != our_color {
+                        all_our_color = false;
+                        break;
                     }
                 }
+                if all_our_color {
+                    // Declare victory (turn out our LEDs) and go home.
+                    for one_index in our_keys {
+                        keybow.set_led(keybow::KeyLocation::Index(*one_index), black)?;
+                    }
+                    let _ = keybow.show_leds();
+                    return Ok(());
+                }
             }
-            _ => {}
         }
     }
 }

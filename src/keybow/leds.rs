@@ -1,34 +1,45 @@
-// TODO: Atomic operations on frame buffer?
-
-use std::error::Error;
-
 use crate::keybow::*;
 
 impl Keybow {
     /// Set one LED color in off-screen frame buffer.
-    pub fn set_led(&mut self, key_position: KeyPosition, color: rgb::RGB<u8>) {
-        // TODO: Check key_position is legal.
-        let key_index = match key_position {
-            KeyPosition::Index(index) => index,
-            KeyPosition::Coordinate(coordinate) => coord_to_index(coordinate),
+    pub fn set_led(
+        &mut self,
+        key_location: KeyLocation,
+        color: rgb::RGB<u8>,
+    ) -> Result<(), KeybowError> {
+        let key_index = match key_location {
+            KeyLocation::Index(index) => index,
+            KeyLocation::Coordinate(coordinate) => coord_to_index(coordinate)?,
         };
-        self.led_data.lock().unwrap()[key_index] = color;
+        if key_index >= hw_specific::NUM_LEDS {
+            Err(KeybowError::BadKeyLocation {
+                bad_location: KeyLocation::Index(key_index),
+            })
+        } else {
+            self.led_data.lock().unwrap()[key_index] = color;
+            Ok(())
+        }
     }
 
     /// Get one LED color from off-screen frame buffer.
-    pub fn get_led(&self, key_position: KeyPosition) -> rgb::RGB<u8> {
-        // TODO: Check key_position is legal.
-        let key_index = match key_position {
-            KeyPosition::Index(index) => index,
-            KeyPosition::Coordinate(coordinate) => coord_to_index(coordinate),
+    pub fn get_led(&self, key_location: KeyLocation) -> Result<rgb::RGB<u8>, KeybowError> {
+        let key_index = match key_location {
+            KeyLocation::Index(index) => index,
+            KeyLocation::Coordinate(coordinate) => coord_to_index(coordinate)?,
         };
-        self.led_data.lock().unwrap()[key_index]
+        if key_index >= hw_specific::NUM_LEDS {
+            Err(KeybowError::BadKeyLocation {
+                bad_location: KeyLocation::Index(key_index),
+            })
+        } else {
+            Ok(self.led_data.lock().unwrap()[key_index])
+        }
     }
 
     /// Return the entire off-screen frame buffer as a linear buffer
     /// indexed by LED index.
     pub fn get_leds(&self) -> [rgb::RGB<u8>; hw_specific::NUM_LEDS] {
-        self.led_data.lock().unwrap().clone()
+        *self.led_data.lock().unwrap()
     }
 
     /// Set off-screen frame buffer to all off.
@@ -42,8 +53,6 @@ impl Keybow {
      *  Changes to LED colors will not be visible until you call this.
      */
     pub fn show_leds(&mut self) -> Result<(), Box<dyn Error>> {
-        // TODO: Should this be redone using serde?
-
         // This is specific to the Keybow 12-key hardware, but I am
         // generalizing it a little in case siilar and related
         // hardware comes along.
@@ -75,7 +84,7 @@ impl Keybow {
 
         match result {
             Err(e) => Err(Box::new(e)),
-            _ => Ok(()), // TODO: What is the good way to do this?
+            _ => Ok(()),
         }
     }
 }

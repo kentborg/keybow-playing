@@ -1,6 +1,6 @@
 use crate::keybow::*;
 
-const HARDWARE_NAME: &str = "Keybow 12-key";
+pub const HARDWARE_NAME: &str = "Keybow 12-key keypad, Raspberry Pi Zero";
 
 pub const NUM_KEYS: usize = 12;
 pub const NUM_LEDS: usize = NUM_KEYS;
