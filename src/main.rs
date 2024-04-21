@@ -158,15 +158,12 @@ my `Keybow` module.
 
  */
 
-#![feature(thread_sleep_until)]
-
-pub mod keybow;
-
+use rgb::RGB;
 use std::iter::zip;
 use std::thread;
 use std::time::Duration;
 
-use bitmaps::Bitmap;
+use keybow::keybow;
 
 /// Simple main() function, at this point mostly an example for using
 /// `keybow` module.
@@ -176,15 +173,7 @@ fn main() -> anyhow::Result<()> {
 
         let keybow = keybow::Keybow::new();
 
-        // This will blow up, with a stacktrace if RUST_BACKTRACE is
-        // set:
-        //let _bad_key_read = keybow.get_key_raw(42)?;
-
-        println!("{:?}", keybow.get_key_raw(42));
-
         println!("key 0 is {:?}", keybow.get_key(0));
-
-        // bitmap holds bools
         println!("key 1 is {:?}", keybow.get_keys().get(1));
     }
 
@@ -193,17 +182,12 @@ fn main() -> anyhow::Result<()> {
 
         let mut keybow = keybow::Keybow::new();
 
-        let mut down_mask = Bitmap::new();
-        for one_key in 0..12 {
-            down_mask.set(one_key, true);
-        }
-
         let mut reg = keybow.register_events(
-            down_mask,
-            Bitmap::new(),
+            [true; 12],
+            [false; 12],
             20,
             ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b'],
-            None,
+            Duration::MAX,
         );
 
         println!("{:?}", reg.next());
@@ -215,14 +199,14 @@ fn main() -> anyhow::Result<()> {
     {
         println!("Play simple game…");
 
-        const BLACK: rgb::RGB<u8> = rgb::RGB { r: 0, g: 0, b: 0 };
-        const GRAY: rgb::RGB<u8> = rgb::RGB {
+        const BLACK: RGB<u8> = RGB { r: 0, g: 0, b: 0 };
+        const GRAY: RGB<u8> = RGB {
             r: 20,
             g: 20,
             b: 20,
         };
-        const RED: rgb::RGB<u8> = rgb::RGB { r: 255, g: 0, b: 0 };
-        const GREEN: rgb::RGB<u8> = rgb::RGB { r: 0, g: 255, b: 0 };
+        const RED: RGB<u8> = RGB { r: 255, g: 0, b: 0 };
+        const GREEN: RGB<u8> = RGB { r: 0, g: 255, b: 0 };
 
         let mut keybow = keybow::Keybow::new();
 
@@ -259,9 +243,10 @@ fn loop_on_events(
     black: rgb::RGB<u8>,
 ) -> anyhow::Result<()> {
     let mut keybow = keybow::Keybow::new();
-    let mut our_mask = Bitmap::new();
-    for one_key in our_keys {
-        our_mask.set(*one_key, true);
+
+    let mut our_mask = [false; 12];
+    for one_of_ours in our_keys {
+        our_mask[*one_of_ours] = true;
     }
 
     let mut reg = keybow.register_events(
@@ -269,7 +254,7 @@ fn loop_on_events(
         our_mask,
         20,
         ['0'; keybow::hw_specific::NUM_KEYS], // Don't care.
-        None,
+        Duration::MAX,
     );
 
     // Player keys are paired, press my own key to light that key, and

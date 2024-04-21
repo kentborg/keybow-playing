@@ -20,7 +20,7 @@ macro_rules! debug_waveform {
  *
  *   To run the debug version:
  *
- * ```
+ * ```text
  *   cargo run --features debug_waveform_print
  * ```
  */

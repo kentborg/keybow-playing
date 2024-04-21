@@ -1,7 +1,4 @@
-# rppal-playing
-
-
-## Work in Progress
+# Work in Progress
 
 This is a work-in-progress. Its goals are fuzzy because the real
 purpose is to be educational; I have been studying Rust for years, but
@@ -9,7 +6,7 @@ I have never put in the time programming in Rust to get good at it.
 
 I am fixing that now, and it is working. (And Rust is proving very nice.)
 
-## The Problem
+# The Problem
 
 A few years ago I bought, and promptly ignored, a
 [Keybow](https://shop.pimoroni.com/products/keybow). It is a keypad
@@ -24,7 +21,7 @@ because I am programming in Rust and not Python.
 
 Time to finally play with my Keybow. In Rust.
 
-## First Step, a `keybow` Module
+# First Step, a `keybow` Module
 
 I have some incomplete ideas about what this might eventually do, but
 first I need a library to access the hardware. As this is a
@@ -33,7 +30,7 @@ discontinued product, my code is not something I expect to put on
 whatever my larger binary program this turns into. It makes my life
 simpler now and I can still pull it out later if I need to.
 
-### Lay of the Land
+## Lay of the Land
 
 - 12-LEDs are set over SPI.
 - 12-keys are read over GPIO pins.
@@ -44,7 +41,7 @@ The Raspberry Pi-specific crate
 seems to have a good reputation. After I got some valuable answers on
 how to use its GPIO module, I decided to go with it.
 
-### My `Keybow` Requirements
+## My `Keybow` Requirements
 
 As I said, my requirements are vague, and maybe I'm being too
 featureful, but my purpose is to learn:
@@ -74,7 +71,7 @@ featureful, but my purpose is to learn:
 - Be fast and not a pig.
 
 
-### Background: Debouncing
+## Background: Debouncing
 
 When a mechanical switch makes contact it will "bounce". That is, make
 contact, then unmake contact, then make contact again, etc. Possibly
@@ -82,7 +79,7 @@ very many times before settling down to being "on". Similarly, when
 the switch is released, it does the whole thing again, until the
 switch finally settles down to again being "off".
 
-### Lot of Threads
+## Lot of Threads
 
 There is no debouncing implemented in Raspberry Pi hardware, so I
 needed implement my own, to turn lots of raw key events into clean
@@ -128,7 +125,7 @@ I do this:
 Yes, I have created two-dozen threads, but they are small and they
 mostly don't do much. It seems the Pi Zero can handle them with ease.
 
-### Learning a Lot
+## Learning a Lot
 
 I honestly don't know what I think of my approach so far, but I am
 pleased it works and that Rust is willing to do what I want it to
@@ -148,12 +145,11 @@ making changes to add some new aspect. Once the the compiler is happy,
 I copy the code to the target, build it again there, and usually it
 works correctly first try.
 
-## Next Steps
+# Next Steps
 
 Do something in application space.
 
-## Examples
+# Examples
 
 At the moment `src/main.rs` is a fairly minimal example of how to use
 my `Keybow` module.
-
