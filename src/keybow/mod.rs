@@ -267,71 +267,57 @@ pub struct HardwareInfo {
     pub layout_text: String,
 }
 
-/// `.unwrap()` is evil in production code, yet the practical way to
-/// lock a mutex is `x.lock().unwrap()`, the problem is in source this
-/// looks very much like `x.unwrap()` where `x` is an `Option` or
-/// `Result`, and those two are bad. This makes it practical to
-/// instead do `x.lock_or_panic()` and not use an evil `.unwrap()`.
+/// I think `.unwrap()` is evil in production code, because it is so
+/// permissive about where it can appear. `lock_or_panic()` is an
+/// alternative to `.lock().unwrap()`.
 pub trait LockOrPanic<T> {
     fn lock_or_panic(&self) -> MutexGuard<T>;
 }
 
 impl<T> LockOrPanic<T> for Mutex<T> {
     fn lock_or_panic(&self) -> MutexGuard<'_, T> {
-        if let Ok(x) = self.lock() {
-            x
-        } else {
-            panic!()
+        match self.lock() {
+            Ok(x) => x,
+            Err(e) => panic!("{}", e),
         }
     }
 }
 
-/// `.unwrap()` is evil in production code, yet the practical way to
-/// write to a `RwLock` is `x.write().unwrap()`, the problem is in
-/// source this looks very much like `x.unwrap()` where `x` is an
-/// `Option` or `Result`, and those two are bad. This makes it
-/// practical to instead do `x.write_or_panic()` and not use an evil
-/// `.unwrap()`.
+/// I think `.unwrap()` is evil in production code, because it is so
+/// permissive about where it can appear. `write_or_panic()` is an
+/// alternative to `.write().unwrap()`.
 pub trait WriteOrPanic<T> {
     fn write_or_panic(&self) -> RwLockWriteGuard<T>;
 }
 
 impl<T> WriteOrPanic<T> for RwLock<T> {
     fn write_or_panic(&self) -> RwLockWriteGuard<'_, T> {
-        if let Ok(x) = self.write() {
-            x
-        } else {
-            panic!()
+        match self.write() {
+            Ok(x) => x,
+            Err(e) => panic!("{}", e),
         }
     }
 }
 
-/// `.unwrap()` is evil in production code, yet the practical way to
-/// read from a `RwLock` is `x.read().unwrap()`, the problem is in
-/// source this looks very much like `x.unwrap()` where `x` is an
-/// `Option` or `Result`, and those two are bad. This makes it
-/// practical to instead do `x.read_or_panic()` and not use an evil
-/// `.unwrap()`.
+/// I think `.unwrap()` is evil in production code, because it is so
+/// permissive about where it can appear. `read_or_panic()` is an
+/// alternative to `.read().unwrap()`.
 pub trait ReadOrPanic<T> {
     fn read_or_panic(&self) -> RwLockReadGuard<T>;
 }
 
 impl<T> ReadOrPanic<T> for RwLock<T> {
     fn read_or_panic(&self) -> RwLockReadGuard<'_, T> {
-        if let Ok(x) = self.read() {
-            x
-        } else {
-            panic!();
+        match self.read() {
+            Ok(x) => x,
+            Err(e) => panic!("{}", e),
         }
     }
 }
 
-/// `.unwrap()` is evil in production code, yet the practical way to
-/// wait on a `Condvar`wait_timeout(guard, dur).unwrap()`, the problem
-/// is in source this looks very much like `x.unwrap()` where `x` is
-/// an `Option` or `Result`, and those two are bad. This makes it
-/// practical to instead do `x.wait_timeout_or_panic(guard, dur)` and
-/// not use an evil `.unwrap()`.
+/// I think `.unwrap()` is evil in production code, because it is so
+/// permissive about where it can appear. `wait_timeout_or_panic()` is
+/// an alternative to `.wait_timeout().unwrap()`.
 pub trait WaitTimeoutOrPanic<'a, T> {
     fn wait_timeout_or_panic(
         &self,
@@ -346,10 +332,9 @@ impl<'a, T> WaitTimeoutOrPanic<'a, T> for Condvar {
         guard: MutexGuard<'a, T>,
         dur: Duration,
     ) -> (MutexGuard<'a, T>, WaitTimeoutResult) {
-        if let Ok(x) = self.wait_timeout(guard, dur) {
-            x
-        } else {
-            panic!();
+        match self.wait_timeout(guard, dur) {
+            Ok(x) => x,
+            Err(e) => panic!("{}", e),
         }
     }
 }
