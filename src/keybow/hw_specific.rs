@@ -1,4 +1,4 @@
-use crate::keybow::*;
+use crate::keybow::HardwareInfo;
 
 pub const HARDWARE_NAME: &str = "Keybow 12-key keypad, Raspberry Pi Zero";
 
@@ -21,6 +21,7 @@ const SPI_SEQ_TO_INDEX_LEDS: [usize; 12] = [3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8
  * ```
  */
 impl HardwareInfo {
+    #[must_use]
     pub const fn get_info() -> super::HardwareInfo {
         HardwareInfo {
             name: HARDWARE_NAME,
@@ -29,7 +30,7 @@ impl HardwareInfo {
             key_index_to_gpio: KEY_INDEX_TO_GPIO,
             xy_to_index_lookup: XY_TO_INDEX_LOOKUP,
             spi_seq_to_index_leds: SPI_SEQ_TO_INDEX_LEDS,
-            layout_text: r#"
+            layout_text: "
   Keypad numbering:
 
      00  01  02  03
@@ -38,7 +39,7 @@ impl HardwareInfo {
            |
            |
        power wire
-"#
+"
             .to_string(),
         }
     }

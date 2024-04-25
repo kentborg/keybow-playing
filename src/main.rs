@@ -158,6 +158,9 @@ my `Keybow` module.
 
  */
 
+#![warn(clippy::pedantic)]
+#![feature(stmt_expr_attributes)] // To permit a: "#[allow(clippy::cast_possible_truncation)]"
+
 use rgb::RGB;
 use std::iter::zip;
 use std::thread;
@@ -165,9 +168,18 @@ use std::time::Duration;
 
 use keybow::keybow;
 
-/// Simple main() function, at this point mostly an example for using
+/// Simple `main()` function, at this point mostly an example for using
 /// `keybow` module.
 fn main() -> anyhow::Result<()> {
+    const BLACK: RGB<u8> = RGB { r: 0, g: 0, b: 0 };
+    const GRAY: RGB<u8> = RGB {
+        r: 20,
+        g: 20,
+        b: 20,
+    };
+    const RED: RGB<u8> = RGB { r: 255, g: 0, b: 0 };
+    const GREEN: RGB<u8> = RGB { r: 0, g: 255, b: 0 };
+
     {
         println!("Read some keys…");
 
@@ -199,19 +211,10 @@ fn main() -> anyhow::Result<()> {
     {
         println!("Play simple game…");
 
-        const BLACK: RGB<u8> = RGB { r: 0, g: 0, b: 0 };
-        const GRAY: RGB<u8> = RGB {
-            r: 20,
-            g: 20,
-            b: 20,
-        };
-        const RED: RGB<u8> = RGB { r: 255, g: 0, b: 0 };
-        const GREEN: RGB<u8> = RGB { r: 0, g: 255, b: 0 };
-
         let mut keybow = keybow::Keybow::new();
 
         for index in 0..12 {
-            keybow.set_led(keybow::KeyLocation::Index(index), GRAY)?;
+            keybow.set_led(&keybow::KeyLocation::Index(index), GRAY)?;
         }
         let _ = keybow.show_leds();
 
@@ -227,7 +230,7 @@ fn main() -> anyhow::Result<()> {
         _ = player2.join();
 
         for one_index in 0..=11 {
-            keybow.set_led(keybow::KeyLocation::Index(one_index), BLACK)?;
+            keybow.set_led(&keybow::KeyLocation::Index(one_index), BLACK)?;
         }
         let _ = keybow.show_leds();
         Ok(())
@@ -272,12 +275,12 @@ fn loop_on_events(
             match event.key_position {
                 keybow::KeyPosition::Down => {
                     // key down, turn on our LED
-                    keybow.set_led(keybow::KeyLocation::Index(our_global_index), our_color)?;
+                    keybow.set_led(&keybow::KeyLocation::Index(our_global_index), our_color)?;
                 }
                 keybow::KeyPosition::Up => {
                     // key up, turn off other player's LED
                     keybow.set_led(
-                        keybow::KeyLocation::Index(global_ours_to_theirs[our_global_index]),
+                        &keybow::KeyLocation::Index(global_ours_to_theirs[our_global_index]),
                         no_color,
                     )?;
                 }
@@ -295,7 +298,7 @@ fn loop_on_events(
                 if all_our_color {
                     // Declare victory (turn out our LEDs) and go home.
                     for one_index in our_keys {
-                        keybow.set_led(keybow::KeyLocation::Index(*one_index), black)?;
+                        keybow.set_led(&keybow::KeyLocation::Index(*one_index), black)?;
                     }
                     let _ = keybow.show_leds();
                     return Ok(());

@@ -32,8 +32,8 @@ mod macros;
 
 use std::collections::VecDeque;
 use std::sync::{
-    Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, WaitTimeoutResult,
-    Weak,
+    Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    WaitTimeoutResult, Weak,
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -45,7 +45,7 @@ use rppal::gpio::{Gpio, InputPin, Level, Trigger};
 use rppal::spi;
 
 #[derive(Error, Debug)]
-pub enum KeybowError {
+pub enum KError {
     #[error(
         "Bad LED location {bad_location:?}, (expected < hw_specific::NUM_LEDS, which is {})",
         hw_specific::NUM_LEDS
@@ -68,7 +68,7 @@ pub enum KeybowError {
 /// for?)
 ///
 /// A single instance of this struct is created by the first call of
-/// new(), and subsequent new()s will get a clone of the struct.
+/// `new()`, and subsequent new()s will get a clone of the struct.
 ///
 /// All Those Mutexes
 /// -----------------
@@ -103,17 +103,17 @@ pub struct Keybow {
     debounce_thread_vec: Vec<Arc<thread::JoinHandle<()>>>,
 
     /// What key events clients are interested in. Length of Vec is
-    /// number of register_events() values outstanding.
+    /// number of `register_events()` values outstanding.
     ///
     /// Our client has an opaque copy of this and is free to delete at
     /// as will. We need our own copy, and it can't vanish while me
     /// might be looking at it, so we keep a weak reference. We will
     /// delete our copy if when we process the next key event we find
-    /// we can't upgrade() the weak reference to real data.
+    /// we can't `upgrade()` the weak reference to real data.
     cust_reg: Arc<Mutex<Vec<Weak<Mutex<CustRegInner>>>>>,
 
-    /// RwLock needed so debounce_thread()s (one per input key) can
-    /// share for setting current values. Though a single lock is
+    /// `RwLock` needed so `debounce_thread()`s (one per input key)
+    /// can share for setting current values. Though a single lock is
     /// shared across as many threads as there are keys, this gets
     /// written on a multiple ms scale, so there should be no
     /// contention problems.
@@ -125,7 +125,7 @@ pub struct Keybow {
     _gpio: Gpio,
 
     /// A global multiplier that applies to all the LEDs when
-    /// show_leds() is called.
+    /// `show_leds()` is called.
     brightness: Arc<Mutex<f32>>,
 }
 
@@ -135,20 +135,20 @@ pub struct KeyEvent {
     /// Which key, by index position.
     pub key_index: usize,
 
-    /// Which key, by char assigned to the key.
+    /// Which key, by `char` assigned to the key.
     pub key_char: char,
 
     /// Whether the key is up or down.
     pub key_position: KeyPosition,
 
-    /// When the event happened, as an Instant.
+    /// When the event happened, as an `Instant`.
     pub key_instant: Instant,
 
-    /// When the event happened, as a SystemTime.
+    /// When the event happened, as a `SystemTime`.
     pub key_systime: SystemTime,
 
-    /// The other key values (alas, as bools) at the time of the key
-    /// event. Useful for metakeys.
+    /// The other key values at the time of the key event. Useful for
+    /// metakeys.
     pub up_down_values: [KeyPosition; hw_specific::NUM_KEYS],
 }
 
@@ -189,8 +189,8 @@ pub struct CustReg {
 }
 
 #[derive(Debug, Clone)]
-/// Used by debounce_thread() (that we started) and
-/// debounce_callback() (called by thread rppal started) to
+/// Used by `debounce_thread()` (that we started) and
+/// `debounce_callback()` (called by thread rppal started) to
 /// communicate with each other.
 struct KeyStateDebounceData {
     key_index: usize,
@@ -231,12 +231,12 @@ pub enum KeyPosition {
 }
 
 /// Look up (x,y) and get back key/LED index.
-fn coord_to_index(coordinate: Point) -> Result<usize, KeybowError> {
+fn coord_to_index(coordinate: &Point) -> Result<usize, KError> {
     let two_d_array = HardwareInfo::get_info().xy_to_index_lookup;
 
     if coordinate.x >= two_d_array.len() || coordinate.y >= two_d_array[0].len() {
-        Err(KeybowError::BadKeyLocation {
-            bad_location: KeyLocation::Coordinate(coordinate),
+        Err(KError::BadKeyLocation {
+            bad_location: KeyLocation::Coordinate(*coordinate),
         })
     } else {
         Ok(two_d_array[coordinate.x][coordinate.y])
@@ -267,74 +267,48 @@ pub struct HardwareInfo {
     pub layout_text: String,
 }
 
-/// I think `.unwrap()` is evil in production code, because it is so
-/// permissive about where it can appear. `lock_or_panic()` is an
-/// alternative to `.lock().unwrap()`.
-pub trait LockOrPanic<T> {
-    fn lock_or_panic(&self) -> MutexGuard<T>;
+/// For a more specific `.unwrap()` that can't accidentally be applied
+/// to an `Option` or the wrong kind of `Result` do:
+///
+///    `some_mutex.lock().unwrap_or_else(mutex_poison);`
+///
+/// This will only work against a `MutexGuard`.
+#[allow(clippy::needless_pass_by_value)]
+fn mutex_poison<T>(g: PoisonError<MutexGuard<T>>) -> MutexGuard<'_, T> {
+    panic!("{}", format!("mutex poisoned {g:?}"))
 }
 
-impl<T> LockOrPanic<T> for Mutex<T> {
-    fn lock_or_panic(&self) -> MutexGuard<'_, T> {
-        match self.lock() {
-            Ok(x) => x,
-            Err(e) => panic!("{}", e),
-        }
-    }
+/// For a more specific `.unwrap()` that can't accidentally be applied
+/// to an `Option` or the wrong kind of `Result` do:
+///
+///    `some_mutex.lock().unwrap_or_else(wait_timeout_poison);`
+///
+/// This will only work against a `WaitTimeoutResult`.
+#[allow(clippy::needless_pass_by_value)]
+fn wait_timeout_poison<T>(
+    g: PoisonError<(MutexGuard<T>, WaitTimeoutResult)>,
+) -> (MutexGuard<T>, WaitTimeoutResult) {
+    panic!("{}", format!("mutex poisoned {g:?}"))
 }
 
-/// I think `.unwrap()` is evil in production code, because it is so
-/// permissive about where it can appear. `write_or_panic()` is an
-/// alternative to `.write().unwrap()`.
-pub trait WriteOrPanic<T> {
-    fn write_or_panic(&self) -> RwLockWriteGuard<T>;
+/// For a more specific `.unwrap()` that can't accidentally be applied
+/// to an `Option` or the wrong kind of `Result` do:
+///
+///    `some_mutex.lock().unwrap_or_else(write_poison);`
+///
+/// This will only work against a `RwLockWriteGuard`.
+#[allow(clippy::needless_pass_by_value)]
+fn write_poison<T>(g: PoisonError<RwLockWriteGuard<T>>) -> RwLockWriteGuard<'_, T> {
+    panic!("{}", format!("mutex poisoned {g:?}"))
 }
 
-impl<T> WriteOrPanic<T> for RwLock<T> {
-    fn write_or_panic(&self) -> RwLockWriteGuard<'_, T> {
-        match self.write() {
-            Ok(x) => x,
-            Err(e) => panic!("{}", e),
-        }
-    }
-}
-
-/// I think `.unwrap()` is evil in production code, because it is so
-/// permissive about where it can appear. `read_or_panic()` is an
-/// alternative to `.read().unwrap()`.
-pub trait ReadOrPanic<T> {
-    fn read_or_panic(&self) -> RwLockReadGuard<T>;
-}
-
-impl<T> ReadOrPanic<T> for RwLock<T> {
-    fn read_or_panic(&self) -> RwLockReadGuard<'_, T> {
-        match self.read() {
-            Ok(x) => x,
-            Err(e) => panic!("{}", e),
-        }
-    }
-}
-
-/// I think `.unwrap()` is evil in production code, because it is so
-/// permissive about where it can appear. `wait_timeout_or_panic()` is
-/// an alternative to `.wait_timeout().unwrap()`.
-pub trait WaitTimeoutOrPanic<'a, T> {
-    fn wait_timeout_or_panic(
-        &self,
-        guard: MutexGuard<'a, T>,
-        dur: Duration,
-    ) -> (MutexGuard<'a, T>, WaitTimeoutResult);
-}
-
-impl<'a, T> WaitTimeoutOrPanic<'a, T> for Condvar {
-    fn wait_timeout_or_panic(
-        &self,
-        guard: MutexGuard<'a, T>,
-        dur: Duration,
-    ) -> (MutexGuard<'a, T>, WaitTimeoutResult) {
-        match self.wait_timeout(guard, dur) {
-            Ok(x) => x,
-            Err(e) => panic!("{}", e),
-        }
-    }
+/// For a more specific `.unwrap()` that can't accidentally be applied
+/// to an `Option` or the wrong kind of `Result` do:
+///
+///    `some_mutex.lock().unwrap_or_else(read_poison);`
+///
+/// This will only work against a `RwLockReadGuard`.
+#[allow(clippy::needless_pass_by_value)]
+fn read_poison<T>(g: PoisonError<RwLockReadGuard<T>>) -> RwLockReadGuard<'_, T> {
+    panic!("{}", format!("mutex poisoned {g:?}"))
 }
