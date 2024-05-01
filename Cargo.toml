@@ -10,6 +10,9 @@ rppal = "0.16.0"
 rgb = "0.8.37"
 thiserror = "1"
 anyhow = { version = "1.0", features = ["backtrace"] }
+static_assertions = "1.1.0"
+tokio = { version = "1", features = ["rt", "macros", "sync", "test-util"] }
+crossbeam-channel = "0.5"
 
 [features]
 debug_waveform_print = []  # cargo run --features debug_waveform_print

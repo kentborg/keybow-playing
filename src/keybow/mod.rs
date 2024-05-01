@@ -11,6 +11,9 @@
  *
  * # This module supports writing to the LEDs, and reading from the keys.
  *
+ * Usable from either async or conventional blocking code (both at the
+ * same time, if you that might be useful).
+ *
  * Note: Functions for setting LEDs are a two-part thing.
  *
  * - First, set the desired color in the "off-screen frame buffer",
@@ -19,12 +22,10 @@
  * - Second, updating the physical LEDs to reflect this off-screen
  *   data.
  *
- * Apologies for pretending a humble illuminated key pad as a fancy
- * mega-pixel display.
- *
- *
  */
 
+mod cust_reg;
+mod cust_reg_async;
 pub mod hw_specific;
 mod keys;
 mod leds;
@@ -32,12 +33,13 @@ mod macros;
 
 use std::collections::VecDeque;
 use std::sync::{
-    Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
-    WaitTimeoutResult, Weak,
+    Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use std::{error::Error, fmt::Debug};
+
+use crossbeam_channel;
 
 use thiserror::Error;
 
@@ -103,7 +105,9 @@ pub struct Keybow {
     debounce_thread_vec: Vec<Arc<thread::JoinHandle<()>>>,
 
     /// What key events clients are interested in. Length of Vec is
-    /// number of `register_events()` values outstanding.
+    /// number of
+    /// `register_events_blocking()`/`register_events_asyc()` values
+    /// outstanding.
     ///
     /// Our client has an opaque copy of this and is free to delete at
     /// as will. We need our own copy, and it can't vanish while me
@@ -136,20 +140,29 @@ pub struct KeyEvent {
     pub key_index: usize,
 
     /// Which key, by `char` assigned to the key.
-    pub key_char: char,
+    pub char: char,
 
     /// Whether the key is up or down.
     pub key_position: KeyPosition,
 
     /// When the event happened, as an `Instant`.
-    pub key_instant: Instant,
+    pub event_instant: Instant,
 
     /// When the event happened, as a `SystemTime`.
-    pub key_systime: SystemTime,
+    pub event_systime: SystemTime,
 
-    /// The other key values at the time of the key event. Useful for
+    /// All the key values at the time of the key event. Useful for
     /// metakeys.
     pub up_down_values: [KeyPosition; hw_specific::NUM_KEYS],
+
+    /// Incrementing event serial number. Note this number is
+    /// incremented with each key event queued, evenn though it is not
+    /// part of the return values from `get_next_char()` nor
+    /// `wait_next_char()`.
+    pub event_num: usize,
+
+    /// Number of events currently queued.
+    pub additional_events_still_queued: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -163,29 +176,73 @@ struct CustRegInner {
     /// Where events we are asked for will be stored. Need a Mutex so
     /// thread that puts events in the queue doesn't interfere with
     /// thread that reads them.
+    ///
+    /// New events are added to the end with `push_back()`, so lowest
+    /// indexes are the oldest events.
     event_queue: Arc<Mutex<VecDeque<KeyEvent>>>,
 
-    /// Condvar insist upon a Mutex, even though we do not need one.
-    wake_cond: Arc<(Mutex<()>, Condvar)>,
+    /// Used to wake blocked async subscribers.
+    async_sender: tokio::sync::watch::Sender<()>,
+    async_receiver: tokio::sync::watch::Receiver<()>,
+
+    /// Used to wake blocked synchronous subscribers.
+    sync_sender: crossbeam_channel::Sender<usize>,
+    sync_receiver: crossbeam_channel::Receiver<usize>,
 
     /// Characters to assign to each key.
     key_mapping: [char; hw_specific::NUM_KEYS],
+
+    /// Number of events queued so far.
+    event_count: usize,
 }
 
 #[derive(Debug, Clone)]
-/// Struct for getting debounced key events. To obtain one of these
-/// call `keybow::register_events()`.
+/// Struct for getting debounced key events via synchronous (blocking)
+/// methods. To obtain one of these call
+/// `keybow::register_events_blocking()`. This can also be used as an
+/// iterator. See: [`CustReg::next()`].
+///
+/// If you want an async (Tokio) version call
+/// `register_events_async()` instead.
 pub struct CustReg {
-    // We need our client code to have a mutex to the registration
-    // data but we will keep a weak reference to it so we can know
-    // that it has gone out of scope and then delete our copy.
-    //
-    // But we want all of this internal stuff to be opaque to the
-    // client code; the client code should just make simple method
-    // calls. So it is a simple struct on the outside. On the inside?
-    // The mutex we actually want the client to have.
+    /// We need our client code to have a mutex to the registration
+    /// data so we can keep a weak reference to it, we can know when
+    /// it has gone out of scope and then delete our internal copy.
+    ///
+    /// But we want all of this internal stuff to be opaque to the
+    /// client code; the client code should just make simple method
+    /// calls. So it is a simple struct on the outside. On the inside?
+    /// The mutex we actually want the client to have.
     reg_inner: Arc<Mutex<CustRegInner>>,
-    iter_timeout: Duration,
+
+    /// Timeout used when keys are read from `CustReg` as in
+    /// iterator. This value can be changed while running.
+    pub iter_timeout: Duration,
+
+    /// Size of event queue. (Changing this value has no effect, the
+    /// queue was already created.)
+    pub queue_capacity: usize,
+}
+
+#[derive(Debug, Clone)]
+/// Struct for getting debounced key events via async (Tokio)
+/// methods. To obtain one of these call
+/// `keybow::register_events_async()`. This can also be used as an
+/// iterator. See: [`CustRegAsync::next()`].
+///
+/// If you want a synchronous (blocking) version call
+/// `register_events_blocking()` instead.
+pub struct CustRegAsync {
+    /// This uses `Custreg` under the hood.
+    pub real_cust_reg: CustReg,
+
+    /// Timeout used when keys are read from `CustReg` as in
+    /// iterator. This value can be changed while running.
+    pub iter_timeout: Duration,
+
+    /// Size of event queue. (Changing this value has no effect, the
+    /// queue was already created.)
+    pub queue_capacity: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -199,16 +256,26 @@ struct KeyStateDebounceData {
 
 #[derive(Debug, Clone)]
 enum DebounceState {
-    // All is quiet, debounce thread is parked.
+    /// All is quiet, debounce thread is parked.
     Stable,
 
-    // Debounce thread is sleeping, then checking, then sleeping…
+    /// Debounce thread is sleeping, then checking, then sleeping…
     Unstable(UnstableState),
 }
 
 #[derive(Debug, Copy, Clone)]
+/// There is one of these for each key, `debounce_callback()` writes
+/// this struct everytime a raw key event causes it to be called;
+/// `debounce_thread()` reads from it.
 struct UnstableState {
+    /// Key read as up or pressed down?
     raw_key_position: KeyPosition,
+
+    /// The is a time in the future. Everytime the callback is called
+    /// this time gets pushed out further into the future; as long as
+    /// this value keeps changing, `debounce_thread()` keeps
+    /// sleeping. Until finally the sleep time quits changing,
+    /// indicating the key is no longer bouncing.
     test_stable_time: Instant,
 }
 
@@ -226,17 +293,20 @@ pub enum KeyLocation {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum KeyPosition {
+    /// Key is not being pressed.
     Up,
+
+    /// Key is being pressed down.
     Down,
 }
 
 /// Look up (x,y) and get back key/LED index.
-fn coord_to_index(coordinate: &Point) -> Result<usize, KError> {
+fn coord_to_index(coordinate: Point) -> Result<usize, KError> {
     let two_d_array = HardwareInfo::get_info().xy_to_index_lookup;
 
     if coordinate.x >= two_d_array.len() || coordinate.y >= two_d_array[0].len() {
         Err(KError::BadKeyLocation {
-            bad_location: KeyLocation::Coordinate(*coordinate),
+            bad_location: KeyLocation::Coordinate(coordinate),
         })
     } else {
         Ok(two_d_array[coordinate.x][coordinate.y])
@@ -267,48 +337,50 @@ pub struct HardwareInfo {
     pub layout_text: String,
 }
 
-/// For a more specific `.unwrap()` that can't accidentally be applied
-/// to an `Option` or the wrong kind of `Result` do:
+/// An alternative to calling a generic `.unwrap()`, this is something
+/// that can't accidentally be applied to an `Option` or the wrong
+/// kind of `Result`.
 ///
 ///    `some_mutex.lock().unwrap_or_else(mutex_poison);`
 ///
 /// This will only work against a `MutexGuard`.
 #[allow(clippy::needless_pass_by_value)]
 fn mutex_poison<T>(g: PoisonError<MutexGuard<T>>) -> MutexGuard<'_, T> {
-    panic!("{}", format!("mutex poisoned {g:?}"))
+    panic!("mutex poisoned {g:?}")
 }
 
-/// For a more specific `.unwrap()` that can't accidentally be applied
-/// to an `Option` or the wrong kind of `Result` do:
-///
-///    `some_mutex.lock().unwrap_or_else(wait_timeout_poison);`
-///
-/// This will only work against a `WaitTimeoutResult`.
-#[allow(clippy::needless_pass_by_value)]
-fn wait_timeout_poison<T>(
-    g: PoisonError<(MutexGuard<T>, WaitTimeoutResult)>,
-) -> (MutexGuard<T>, WaitTimeoutResult) {
-    panic!("{}", format!("mutex poisoned {g:?}"))
-}
-
-/// For a more specific `.unwrap()` that can't accidentally be applied
-/// to an `Option` or the wrong kind of `Result` do:
+/// An alternative to calling a generic `.unwrap()`, this is something
+/// that can't accidentally be applied to an `Option` or the wrong
+/// kind of `Result`.
 ///
 ///    `some_mutex.lock().unwrap_or_else(write_poison);`
 ///
 /// This will only work against a `RwLockWriteGuard`.
 #[allow(clippy::needless_pass_by_value)]
 fn write_poison<T>(g: PoisonError<RwLockWriteGuard<T>>) -> RwLockWriteGuard<'_, T> {
-    panic!("{}", format!("mutex poisoned {g:?}"))
+    panic!("mutex poisoned {g:?}")
 }
 
-/// For a more specific `.unwrap()` that can't accidentally be applied
-/// to an `Option` or the wrong kind of `Result` do:
+/// An alternative to calling a generic `.unwrap()`, this is something
+/// that can't accidentally be applied to an `Option` or the wrong
+/// kind of `Result`.
 ///
 ///    `some_mutex.lock().unwrap_or_else(read_poison);`
 ///
 /// This will only work against a `RwLockReadGuard`.
 #[allow(clippy::needless_pass_by_value)]
 fn read_poison<T>(g: PoisonError<RwLockReadGuard<T>>) -> RwLockReadGuard<'_, T> {
-    panic!("{}", format!("mutex poisoned {g:?}"))
+    panic!("mutex poisoned {g:?}")
+}
+
+/// An alternative to calling a generic `.unwrap()`, this is something
+/// that can't accidentally be applied to an `Option` or the wrong
+/// kind of `Result`.
+///
+///    `some_mutex.lock().unwrap_or_else(try_send_error);`
+///
+/// This will only work against a `crossbeam_channel::TrySendError`.
+#[allow(clippy::needless_pass_by_value)]
+fn try_send_error<T>(g: crossbeam_channel::TrySendError<T>) {
+    panic!("crossbeam channel is full {g:?}")
 }

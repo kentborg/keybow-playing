@@ -127,14 +127,20 @@ I do this:
 Yes, I have created two-dozen threads, but they are small and they
 mostly don't do much. It seems the Pi Zero can handle them with ease.
 
+
+## Async
+
+The resulting code works as both sync or async code, and the code to
+use the two flavors is only as different as I think is necessary. And
+both sync and async could be used at the same time, if that were
+somehow useful.
+
+
 ## Learning a Lot
 
 I honestly don't know what I think of my approach so far, but I am
 pleased it works and that Rust is willing to do what I want it to
-do. I suspect I have too many mutexes. I'm also not sure what it means
-that I am using a `CondVar` in a degenerate way without the obligatory
-"var" part, but I concluded I didn't need it so I put in a `()`. It is
-fun getting in this deep.
+do. I suspect I have too many mutexes.
 
 Were I to do this again from scratch I wonder how similar the result
 would be. Maybe my debounce threads would instead be in async/await
@@ -168,18 +174,160 @@ use std::time::Duration;
 
 use keybow::keybow;
 
+const BLACK: RGB<u8> = RGB { r: 0, g: 0, b: 0 };
+const GRAY: RGB<u8> = RGB {
+    r: 20,
+    g: 20,
+    b: 20,
+};
+const RED: RGB<u8> = RGB { r: 255, g: 0, b: 0 };
+const GREEN: RGB<u8> = RGB { r: 0, g: 255, b: 0 };
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
+    // These two functions are almost the same.
+    let _ = sync_main(); // Version using blocking calls.
+    async_main().await // Version using Tokio async.
+}
+
+async fn async_main() -> anyhow::Result<()> {
+    let _keybow = keybow::Keybow::new();
+
+    {
+        println!("Read some keys…");
+
+        let keybow = keybow::Keybow::new();
+
+        println!("key 0 is {:?}", keybow.get_key(0));
+        println!("key 1 is {:?}", keybow.get_keys().get(1));
+    }
+
+    {
+        println!("Play simple game…");
+
+        let mut keybow = keybow::Keybow::new();
+
+        for index in 0..12 {
+            keybow.set_led(&keybow::KeyLocation::Index(index), GRAY)?;
+        }
+        let _ = keybow.show_leds();
+
+        let player1_keys: [usize; 6] = [0, 1, 4, 5, 8, 9];
+        let player2_keys: [usize; 6] = [3, 2, 7, 6, 11, 10];
+
+        let (_, _) = tokio::join!(
+            loop_on_events_async(&player1_keys, &player2_keys, RED, GRAY, BLACK),
+            loop_on_events_async(&player2_keys, &player1_keys, GREEN, GRAY, BLACK),
+        );
+
+        // Clear the LEDs.
+        for one_index in 0..=11 {
+            keybow.set_led(&keybow::KeyLocation::Index(one_index), BLACK)?;
+        }
+        let _ = keybow.show_leds();
+        Ok(())
+    }
+}
+
+async fn loop_on_events_async(
+    our_keys: &[usize; 6],
+    their_keys: &[usize; 6],
+    our_color: rgb::RGB<u8>,
+    no_color: rgb::RGB<u8>,
+    black: rgb::RGB<u8>,
+) -> anyhow::Result<()> {
+    let mut keybow = keybow::Keybow::new();
+
+    let mut our_mask = [false; 12];
+    for one_of_ours in our_keys {
+        our_mask[*one_of_ours] = true;
+    }
+
+    let mut reg = keybow.register_events_async(
+        our_mask,
+        our_mask,
+        20,
+        ['0'; keybow::hw_specific::NUM_KEYS], // Don't care.
+        Duration::MAX,
+    );
+
+    // Player keys are paired, press my own key to light that key, and
+    // to turn off the corresponding key of my opponent. This maps from
+    // my key to opponent's corresponding key.
+    let mut global_ours_to_theirs = [0; keybow::hw_specific::NUM_KEYS];
+    let ours_theirs = zip(our_keys, their_keys);
+    for (ours, theirs) in ours_theirs {
+        global_ours_to_theirs[*ours] = *theirs;
+    }
+
+    loop {
+        if let Some(mut event) = tokio::time::timeout(
+            Duration::from_secs(5),
+            reg.wait_next_key_event_masked(our_mask),
+        )
+        .await
+        .unwrap()
+        {
+            let our_global_index = event.key_index;
+            match event.key_position {
+                keybow::KeyPosition::Down => {
+                    // key down
+
+                    // if player pressed other keys, too, turn off all
+                    // of this player's LEDs.
+                    event.up_down_values[event.key_index] = keybow::KeyPosition::Up;
+                    let mut cheater = false;
+
+                    for one_position in event.up_down_values {
+                        if one_position == keybow::KeyPosition::Down {
+                            cheater = true;
+                            break;
+                        };
+                    }
+
+                    if cheater {
+                        for one_key in our_keys {
+                            keybow.set_led(&keybow::KeyLocation::Index(*one_key), GRAY)?;
+                        }
+                    } else {
+                        // turn on our LED
+                        keybow.set_led(&keybow::KeyLocation::Index(our_global_index), our_color)?;
+                    }
+                }
+                keybow::KeyPosition::Up => {
+                    // key up, turn off other player's LED
+                    keybow.set_led(
+                        &keybow::KeyLocation::Index(global_ours_to_theirs[our_global_index]),
+                        no_color,
+                    )?;
+                }
+            };
+            let _ = keybow.show_leds();
+            {
+                let led_snapshot = keybow.get_leds();
+                let mut all_our_color = true;
+                for one_index in our_keys {
+                    if led_snapshot[*one_index] != our_color {
+                        all_our_color = false;
+                        break;
+                    }
+                }
+                if all_our_color {
+                    // Declare victory (turn out our LEDs) and go home.
+                    for one_index in our_keys {
+                        keybow.set_led(&keybow::KeyLocation::Index(*one_index), black)?;
+                    }
+                    let _ = keybow.show_leds();
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
 /// Simple `main()` function, at this point mostly an example for using
 /// `keybow` module.
-fn main() -> anyhow::Result<()> {
-    const BLACK: RGB<u8> = RGB { r: 0, g: 0, b: 0 };
-    const GRAY: RGB<u8> = RGB {
-        r: 20,
-        g: 20,
-        b: 20,
-    };
-    const RED: RGB<u8> = RGB { r: 255, g: 0, b: 0 };
-    const GREEN: RGB<u8> = RGB { r: 0, g: 255, b: 0 };
-
+fn sync_main() -> anyhow::Result<()> {
     {
         println!("Read some keys…");
 
@@ -194,7 +342,7 @@ fn main() -> anyhow::Result<()> {
 
         let mut keybow = keybow::Keybow::new();
 
-        let mut reg = keybow.register_events(
+        let mut reg = keybow.register_events_blocking(
             [true; 12],
             [false; 12],
             20,
@@ -229,6 +377,7 @@ fn main() -> anyhow::Result<()> {
         _ = player1.join();
         _ = player2.join();
 
+        // Clear the LEDs.
         for one_index in 0..=11 {
             keybow.set_led(&keybow::KeyLocation::Index(one_index), BLACK)?;
         }
@@ -252,7 +401,7 @@ fn loop_on_events(
         our_mask[*one_of_ours] = true;
     }
 
-    let mut reg = keybow.register_events(
+    let mut reg = keybow.register_events_blocking(
         our_mask,
         our_mask,
         20,
@@ -270,12 +419,32 @@ fn loop_on_events(
     }
 
     loop {
-        if let Some(event) = reg.wait_next_key_event_masked(our_mask, Duration::from_secs(5)) {
+        if let Some(mut event) = reg.wait_next_key_event_masked(our_mask, Duration::from_secs(5)) {
             let our_global_index = event.key_index;
             match event.key_position {
                 keybow::KeyPosition::Down => {
-                    // key down, turn on our LED
-                    keybow.set_led(&keybow::KeyLocation::Index(our_global_index), our_color)?;
+                    // key down
+
+                    // if player pressed other keys, too, turn off all
+                    // of this player's LEDs.
+                    event.up_down_values[event.key_index] = keybow::KeyPosition::Up;
+                    let mut cheater = false;
+
+                    for one_position in event.up_down_values {
+                        if one_position == keybow::KeyPosition::Down {
+                            cheater = true;
+                            break;
+                        };
+                    }
+
+                    if cheater {
+                        for one_key in our_keys {
+                            keybow.set_led(&keybow::KeyLocation::Index(*one_key), GRAY)?;
+                        }
+                    } else {
+                        // turn on our LED
+                        keybow.set_led(&keybow::KeyLocation::Index(our_global_index), our_color)?;
+                    }
                 }
                 keybow::KeyPosition::Up => {
                     // key up, turn off other player's LED

@@ -1,11 +1,15 @@
+use crossbeam_channel;
 use std::sync::OnceLock;
+use tokio;
 
 use crate::keybow::{
-    hw_specific, mutex_poison, read_poison, spi, thread, wait_timeout_poison, write_poison, Arc,
-    Condvar, CustReg, CustRegInner, DebounceState, Duration, Gpio, HardwareInfo, InputPin, Instant,
-    KError, KeyEvent, KeyLocation, KeyPosition, KeyStateDebounceData, Keybow, Level, Mutex, RwLock,
-    SystemTime, Trigger, UnstableState, VecDeque, Weak,
+    hw_specific, mutex_poison, read_poison, spi, thread, write_poison, Arc, CustReg, CustRegInner,
+    DebounceState, Duration, Gpio, HardwareInfo, InputPin, Instant, KError, KeyLocation,
+    KeyPosition, KeyStateDebounceData, Keybow, Level, Mutex, RwLock, SystemTime, Trigger,
+    UnstableState, VecDeque, Weak,
 };
+
+use super::CustRegAsync;
 
 static KEYBOW_GLOBAL_MUTEX: OnceLock<crate::keybow::Keybow> = OnceLock::new();
 
@@ -84,12 +88,15 @@ impl Keybow {
 
         for index in 0..hw_specific::NUM_KEYS {
             // Initialize one KeyStateDebounceData
-            let key_state_position = KeyPosition::from(
-                keybow.gpio_keys[index]
-                    .lock()
-                    .unwrap_or_else(mutex_poison)
-                    .is_low(),
-            );
+            let key_state_position = {
+                KeyPosition::from(
+                    keybow.gpio_keys[index]
+                        .lock()
+                        .unwrap_or_else(mutex_poison)
+                        .is_low(),
+                )
+            }; // gpio_keys[index] lock released.
+
             let debounce_state = DebounceState::Stable;
             let key_state_mutex = Arc::new(Mutex::new(KeyStateDebounceData {
                 key_index: index,
@@ -152,7 +159,7 @@ impl Keybow {
                 })
                 .unwrap_or_else(|e| {
                     panic!("{e:?}: failed set_async_interrupt() for gpio pin {one_key:?}.")
-                });
+                }); // one_key lock freed.
         }
         keybow
     }
@@ -240,7 +247,7 @@ impl Keybow {
                     (key_state_debounce_data.key_index, key_state)
                 }
             }
-        }
+        } // key_state lock freed.
 
         thread::park(); // We start parked.
         loop {
@@ -270,13 +277,13 @@ impl Keybow {
             {
                 let mut key_state_debounce_data = key_state.lock().unwrap_or_else(mutex_poison);
                 key_state_debounce_data.debounce_state = DebounceState::Stable;
-            }
+            } // key_state lock freed.
 
             // Update complete key map.
             {
                 let mut up_dn_values = current_up_down_values.write().unwrap_or_else(write_poison);
                 up_dn_values[key_index] = unstable_state.raw_key_position;
-            }
+            } // current_up_down_values lock freed.
 
             // Turn this into events anyone has registered for.
             {
@@ -286,103 +293,36 @@ impl Keybow {
                     let one_cust_reg_upgrade = one_cust_reg.upgrade();
                     match &one_cust_reg_upgrade {
                         Some(one_cust_reg_upgraded) => {
-                            let one_cust_reg_finally =
+                            let mut one_cust_reg_finally =
                                 one_cust_reg_upgraded.lock().unwrap_or_else(mutex_poison);
-                            Keybow::process_one_cust_reg(
+                            one_cust_reg_finally.process_one_event(
                                 key_index,
                                 unstable_state.raw_key_position,
                                 Instant::now(),
                                 SystemTime::now(),
-                                &one_cust_reg_finally,
-                                //*current_up_down_values.read_or_panic(),
                                 *current_up_down_values.read().unwrap_or_else(read_poison),
                             );
                         }
                         None => {
                             // No one cares about this reg, client
                             // code deleted their copy, we'll delete
-                            // our, too.
+                            // ours, too.
                             index_needs_deleting = Some(index);
                         }
                     };
-                }
+                } // one_cust_reg lock freed.
 
                 if let Some(index) = index_needs_deleting {
                     // Theoretically could be more than one that needs deleting, but
                     // unlikely, so delete one now. Delete any other next keystroke.
                     thread_cust_reg_vec.remove(index);
                 };
-            }
+            } // thread_cust_reg lock freed.
 
             // Park ourselves until more key activity and debounce_callback() unparks us.
             crate::debug_waveform!("<");
             thread::park();
             crate::debug_waveform!(">");
-        }
-    }
-
-    /// Updates data structures for one cust registration with new key
-    /// event information.
-    ///
-    /// More than one client thread can register for specific key
-    /// events. When a new key event happens this gets called, once
-    /// for each of those registrations.
-    fn process_one_cust_reg(
-        key_index: usize,
-        key_position: KeyPosition,
-        key_instant: Instant,
-        key_systime: SystemTime,
-        some_cust_reg: &CustRegInner,
-        current_up_down_values: [KeyPosition; hw_specific::NUM_KEYS],
-    ) {
-        let key_event = KeyEvent {
-            key_index,
-            key_char: some_cust_reg.key_mapping[key_index],
-            key_position,
-            key_instant,
-            key_systime,
-            up_down_values: current_up_down_values,
-        };
-        if Keybow::is_key_event_wanted(&key_event, some_cust_reg) {
-            let mut circ_buf = some_cust_reg
-                .event_queue
-                .lock()
-                .unwrap_or_else(mutex_poison);
-
-            // Make room if full.
-            if circ_buf.len() == circ_buf.capacity() {
-                let _ = circ_buf.pop_front();
-            }
-
-            // Save event.
-            circ_buf.push_back(key_event);
-
-            // Let any waiting code know there is a new event. On the
-            // theory that there are not many clients, we wake them
-            // all. Whether they will be interested in this event or
-            // not.
-
-            // Note: the "var" Mutex in a condvar is required because
-            // they can have spurious wakeups and they insist we not
-            // be confused by them.
-            let (_lock, cvar) = &*(some_cust_reg.wake_cond);
-
-            // We might have more than one customer, but we assume not
-            // many. We don't know which might be currently interested
-            // in this event, so we wake them all, let them all look
-            // at it.
-            cvar.notify_all();
-        }; // We have now relinquished event_queue mutex.
-    }
-
-    /// Tests whether key event matches masks for what up/down events
-    /// are wanted.
-    fn is_key_event_wanted(event: &KeyEvent, cust_reg: &CustRegInner) -> bool {
-        let key_index = event.key_index;
-
-        match event.key_position {
-            KeyPosition::Down => cust_reg.keydown_mask[key_index],
-            KeyPosition::Up => cust_reg.keyup_mask[key_index],
         }
     }
 
@@ -419,7 +359,7 @@ impl Keybow {
      */
     fn debounce_callback(
         key_state: &Arc<Mutex<KeyStateDebounceData>>,
-        _key_position: KeyPosition, // Their value seems spurious.
+        _key_position: KeyPosition, // The value they pass seems spurious.
         threshold: Duration,
         _key_index: usize,
         debounce_thread: &Arc<thread::JoinHandle<()>>,
@@ -427,7 +367,7 @@ impl Keybow {
     ) {
         // Their key_position appears bad, we'll look for ourselves.
         let key_position =
-            KeyPosition::from(gpio_key_mutex.lock().unwrap_or_else(mutex_poison).is_low());
+            { KeyPosition::from(gpio_key_mutex.lock().unwrap_or_else(mutex_poison).is_low()) }; // gpio lock freed.
 
         match key_position {
             KeyPosition::Down => {
@@ -446,7 +386,7 @@ impl Keybow {
                     DebounceState::Unstable(_) => false,
                     DebounceState::Stable => true,
                 }
-            };
+            }; // key_state lock freed.
 
             key_state_debounce_data.debounce_state = DebounceState::Unstable(UnstableState {
                 raw_key_position: key_position,
@@ -462,7 +402,9 @@ impl Keybow {
         }
     }
 
-    /// Get one current debounced key value.
+    /// Get one current debounced key value. This is not a key event,
+    /// but current position; repeated calls on a key that isn't
+    /// changing will return the same value repeatedly.
     ///
     /// # Errors
     ///
@@ -510,7 +452,7 @@ impl Keybow {
     ///    be returned as the character for the corresponding key.
     /// * `iter_timeout` Timeout used when reading key events via
     ///    iterator.
-    pub fn register_events(
+    pub fn register_events_blocking(
         &mut self,
         keydown_mask: [bool; hw_specific::NUM_KEYS],
         keyup_mask: [bool; hw_specific::NUM_KEYS],
@@ -518,12 +460,22 @@ impl Keybow {
         key_mapping: [char; hw_specific::NUM_KEYS],
         iter_timeout: Duration,
     ) -> CustReg {
+        // Parameter is size of crossbeam_channel.
+        let (cb_sender, cb_receiver) = crossbeam_channel::bounded(1);
+
+        // Parameter is intial value in tokio::sync::watch.
+        let (tk_sender, tk_receiver) = tokio::sync::watch::channel(());
+
         let register = CustRegInner {
             keydown_mask,
             keyup_mask,
             key_mapping,
             event_queue: Arc::new(Mutex::new(VecDeque::with_capacity(queue_length))),
-            wake_cond: Arc::new((Mutex::new(()), Condvar::new())),
+            async_sender: tk_sender,
+            async_receiver: tk_receiver,
+            sync_sender: cb_sender,
+            sync_receiver: cb_receiver,
+            event_count: 0,
         };
         let register_mutex = Arc::new(Mutex::new(register));
         let register_weak = Arc::downgrade(&register_mutex);
@@ -532,6 +484,30 @@ impl Keybow {
         CustReg {
             reg_inner: register_mutex,
             iter_timeout,
+            queue_capacity: queue_length,
+        }
+    } // cust_reg lock freed.
+
+    pub fn register_events_async(
+        &mut self,
+        keydown_mask: [bool; hw_specific::NUM_KEYS],
+        keyup_mask: [bool; hw_specific::NUM_KEYS],
+        queue_length: usize,
+        key_mapping: [char; hw_specific::NUM_KEYS],
+        iter_timeout: Duration,
+    ) -> CustRegAsync {
+        let cust_reg = self.register_events_blocking(
+            keydown_mask,
+            keyup_mask,
+            queue_length,
+            key_mapping,
+            iter_timeout,
+        );
+
+        CustRegAsync {
+            real_cust_reg: cust_reg,
+            iter_timeout, // TODO: Make changing this have effect.
+            queue_capacity: queue_length,
         }
     }
 }
@@ -561,145 +537,5 @@ impl From<bool> for KeyPosition {
         } else {
             KeyPosition::Up
         }
-    }
-}
-
-impl CustReg {
-    /// Get next key event that matches supplied mask, or `None`. Any
-    /// older key events in the queue that do not match the mask will
-    /// remain in the queue.
-    pub fn get_next_key_event_masked(
-        &mut self,
-        mask: [bool; hw_specific::NUM_KEYS],
-    ) -> Option<KeyEvent> {
-        let cust_reg_inner = self.reg_inner.lock().unwrap_or_else(mutex_poison);
-        let mut locked_queue = cust_reg_inner
-            .event_queue
-            .lock()
-            .unwrap_or_else(mutex_poison);
-
-        let mut found_index = None;
-        for (index, event) in locked_queue.iter_mut().rev().enumerate() {
-            if mask[event.key_index] {
-                found_index = Some(index);
-                break;
-            }
-        }
-
-        match found_index {
-            Some(good_index) => locked_queue.remove(good_index),
-            None => None,
-        }
-    }
-
-    /// A wrapper on `get_next_key_event_masked()`, with an added
-    /// timeout. Still might return `None`.
-    pub fn wait_next_key_event_masked(
-        &mut self,
-        mask: [bool; hw_specific::NUM_KEYS],
-        mut timeout: Duration,
-    ) -> Option<KeyEvent> {
-        // Limit timeout to a billion years, to avoid overflow
-        // problems doing arithmetic near Duration::MAX.
-        const BIG_DURATION: Duration = Duration::from_secs(1_000_000_000 * 365 * 24 * 60 * 60);
-        if timeout > BIG_DURATION {
-            timeout = BIG_DURATION;
-        }
-
-        // Note our original deadline only once.
-        let deadline_instant = Instant::now() + timeout;
-
-        // Call until we get a result or have passed the deadline.
-        loop {
-            // We might call this when no event is ready for us. That's okay.
-            let possible_event = self.get_next_key_event_masked(mask);
-
-            if let Some(real_event) = possible_event {
-                return Some(real_event); // Return result!
-            }
-
-            let now = Instant::now();
-            if deadline_instant < now {
-                return None; // Past deadline, return None.
-            }
-
-            // Else wait until a new event appears. It might not be an event for us
-
-            let new_duration = deadline_instant - Instant::now();
-            let (lock, cvar) = &*(self
-                .reg_inner
-                .lock()
-                .unwrap_or_else(mutex_poison)
-                .wake_cond
-                .clone());
-
-            // wait_timeout() insists on a MutexGuard, so
-            // I'll give it my _dummy.
-            let dummy = lock.lock().unwrap_or_else(mutex_poison);
-            let _ = cvar
-                .wait_timeout(dummy, new_duration)
-                .unwrap_or_else(wait_timeout_poison);
-        }
-    }
-
-    /// Throw away all queued key events.
-    pub fn clear_queue(&mut self) {
-        let cust_reg_inner = self.reg_inner.lock().unwrap_or_else(mutex_poison);
-        let mut event_queue_locked = cust_reg_inner
-            .event_queue
-            .lock()
-            .unwrap_or_else(mutex_poison);
-
-        event_queue_locked.clear();
-    }
-
-    /// Get next key event, whatever it be.
-    pub fn get_next_key_event(&mut self) -> Option<KeyEvent> {
-        self.reg_inner
-            .lock()
-            .unwrap_or_else(mutex_poison)
-            .event_queue
-            .lock()
-            .unwrap_or_else(mutex_poison)
-            .pop_front()
-    }
-
-    /// Get character of next event, whatever it be.
-    pub fn get_next_char(&mut self) -> Option<char> {
-        self.get_next_key_event().map(|event| event.key_char)
-    }
-
-    /// Wait for next key event, whatever it be.
-    pub fn wait_next_key_event(&mut self, timeout: Duration) -> Option<KeyEvent> {
-        self.wait_next_key_event_masked([true; hw_specific::NUM_KEYS], timeout)
-    }
-
-    /// Wait for next event, return character, whatever it be.
-    pub fn wait_next_char(&mut self, timeout: Duration) -> Option<char> {
-        self.wait_next_key_event(timeout)
-            .map(|event| event.key_char)
-    }
-}
-
-impl Iterator for CustReg {
-    type Item = crate::keybow::KeyEvent;
-
-    /// Note: This iterator changes size as new key events happen.
-    fn next(&mut self) -> Option<KeyEvent> {
-        self.wait_next_key_event(self.iter_timeout)
-    }
-
-    /// Returns (number of events currently present, Some(ring buffer capacity))
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let cust_reg_inner = self.reg_inner.lock().unwrap_or_else(mutex_poison);
-        let event_queue_locked = cust_reg_inner
-            .event_queue
-            .lock()
-            .unwrap_or_else(mutex_poison);
-
-        (
-            event_queue_locked.len(),
-            Some(event_queue_locked.capacity()),
-        )
     }
 }

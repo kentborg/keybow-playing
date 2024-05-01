@@ -125,14 +125,20 @@ I do this:
 Yes, I have created two-dozen threads, but they are small and they
 mostly don't do much. It seems the Pi Zero can handle them with ease.
 
+
+## Async
+
+The resulting code works as both sync or async code, and the code to
+use the two flavors is only as different as I think is necessary. And
+both sync and async could be used at the same time, if that were
+somehow useful.
+
+
 ## Learning a Lot
 
 I honestly don't know what I think of my approach so far, but I am
 pleased it works and that Rust is willing to do what I want it to
-do. I suspect I have too many mutexes. I'm also not sure what it means
-that I am using a `CondVar` in a degenerate way without the obligatory
-"var" part, but I concluded I didn't need it so I put in a `()`. It is
-fun getting in this deep.
+do. I suspect I have too many mutexes.
 
 Were I to do this again from scratch I wonder how similar the result
 would be. Maybe my debounce threads would instead be in async/await

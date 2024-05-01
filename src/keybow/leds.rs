@@ -16,7 +16,7 @@ impl Keybow {
     ) -> Result<(), KError> {
         let key_index = match *key_location {
             KeyLocation::Index(index) => index,
-            KeyLocation::Coordinate(coordinate) => coord_to_index(&coordinate)?,
+            KeyLocation::Coordinate(coordinate) => coord_to_index(coordinate)?,
         };
         if key_index >= hw_specific::NUM_LEDS {
             Err(KError::BadKeyLocation {
@@ -36,7 +36,7 @@ impl Keybow {
     pub fn get_led(&self, key_location: &KeyLocation) -> Result<rgb::RGB<u8>, KError> {
         let key_index = match key_location {
             KeyLocation::Index(index) => *index,
-            KeyLocation::Coordinate(coordinate) => coord_to_index(coordinate)?,
+            KeyLocation::Coordinate(coordinate) => coord_to_index(*coordinate)?,
         };
         if key_index >= hw_specific::NUM_LEDS {
             Err(KError::BadKeyLocation {
